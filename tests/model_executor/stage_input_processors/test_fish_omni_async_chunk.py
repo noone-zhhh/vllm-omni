@@ -176,3 +176,82 @@ def test_windows_carry_their_index_in_the_stream(left):
     seqs.append((final.meta.chunk_seq, int(final.meta.left_context_size)))
     assert [seq for seq, _ in seqs] == list(range(len(seqs)))
     assert all(context == (0 if left == 0 or seq == 0 else left) for seq, context in seqs)
+
+
+def test_native_windows_preserve_request_audio_across_reordering_and_final_flush():
+    """Exercise the actual processor, native metadata adapter, and eager DAC wrapper.
+
+    Only the neural codec is replaced: it emits each frame's first code as
+    samples, so duplicated context, missing tails, and cross-request mixing
+    are observable without model weights or an accelerator.
+    """
+    from vllm_omni.model_executor.models.fish_speech.fish_speech_dac_decoder import FishSpeechDACDecoder
+    from vllm_omni.worker_v2.omni_generation_model_runner import OmniGenerationModelRunner
+
+    class FrameCodec:
+        def decode(self, codes, feature_lengths):
+            audio = codes[:, :1].float().repeat_interleave(2048, dim=-1)
+            return audio, feature_lengths * 2048
+
+    decoder = object.__new__(FishSpeechDACDecoder)
+    torch.nn.Module.__init__(decoder)
+    decoder._codec = FrameCodec()
+    decoder._codec_decode_takes_lengths = True
+    decoder._num_codebooks = CODEBOOKS
+    decoder._output_sample_rate = 44100
+    decoder._hop_length = 2048
+    decoder._logged_codec_stats = True
+    decoder._ensure_codec_loaded = lambda: None
+
+    manager = _manager(ramp="6,8,12,16,24,32", chunk=64, left=32)
+    lengths = {"a": 175, "b": 162}  # partial tail vs empty terminal after a full window
+    offsets = {"a": 0, "b": 1000}
+    received: dict[str, list[torch.Tensor]] = {key: [] for key in lengths}
+    sequences: dict[str, list[int]] = {key: [] for key in lengths}
+    terminals = {}
+    for step in range(max(lengths.values()) + 1):
+        keys = [key for key in lengths if step <= lengths[key]]
+        if step % 2:
+            keys.reverse()
+        outputs = []
+        for key in keys:
+            codes = torch.full((CODEBOOKS,), offsets[key] + step, dtype=torch.long)
+            main = EOS if step == lengths[key] else SEMANTIC_BEGIN_ID + 1
+            outputs.append({"codes.audio": torch.cat((torch.tensor([main]), codes)).unsqueeze(0)})
+        payloads = fish_omni_to_dac_decoder_async_chunk_batch(
+            manager, outputs, [_request(key) for key in keys], [step == lengths[key] for key in keys]
+        )
+        ready = []
+        for key, payload in zip(keys, payloads, strict=True):
+            if payload is None:
+                continue
+            prompt, terminal = _native_prompt(payload)
+            if terminal:
+                terminals[key] = payload.codes.audio.shape[1]
+            if not payload.codes.audio.numel():
+                assert prompt == [] and terminal
+                continue
+            assert prompt == [0]
+            sequences[key].append(payload.meta.chunk_seq)
+            ready.append((key, to_dict(payload)))
+        if not ready:
+            continue
+        output = decoder.forward(
+            input_ids=torch.zeros(len(ready), dtype=torch.long),
+            seq_token_counts=[1] * len(ready),
+            runtime_additional_information=[payload for _, payload in ready],
+            request_ids=[key for key, _ in ready],
+        )
+        # Include MRV2's per-request output materialization in the contract.
+        rows = OmniGenerationModelRunner._build_pooler_output_from_cpu(output.multimodal_outputs, len(ready))
+        for (key, _), row in zip(ready, rows, strict=True):
+            assert row is not None
+            received[key].append(row["model_outputs"])
+            assert int(row["sr"]) == 44100
+
+    assert terminals == {"b": 0, "a": 45}  # 32 context + 13 new frames
+    for key, length in lengths.items():
+        assert sequences[key] == list(range(len(sequences[key])))
+        actual = torch.cat(received[key])
+        expected = (torch.arange(length).float() + offsets[key]).repeat_interleave(2048)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -253,3 +253,67 @@ bfloat16 (64.4 GiB for all 256 routed experts). One card cannot hold that
 expansion. Expert parallel places 128 experts on each card, about 32 GiB,
 plus the sharded backbone. The codec then fits in the headroom on the second
 card. This profile has not been scored for WER or RTF.
+
+### Opt-in NPU DAC on Model Runner V2
+
+The default NPU profile keeps stage 1 (DAC) on Model Runner V1. To opt into
+the MRV2 generation runner, use the inherited profile below from a repository
+checkout:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1 vllm serve fishaudio/drama-3 --omni --port 8091 \
+    --deploy-config vllm_omni/deploy/fish_omni_npu_mrv2.yaml
+```
+
+This changes only the NPU DAC runner and its outer graph mode. Stage 0 keeps
+its existing TP2/EP execution, stage 1 shares device 1, and both stages keep
+the base profile's memory limits, sampling, and streaming window sizes.
+The DAC runs eagerly (`cudagraph_mode: NONE`), using the existing module
+decoder with left-context re-decoding. CUDA graph and stateful codec
+optimizations remain CUDA-only. Codec weights load during worker warmup;
+MRV2 receives each nonempty `[10, frames]` window as one placeholder token
+and reads the codes from runtime information.
+
+The current shared MRV2 generation runner materializes NPU outputs
+synchronously on the CPU; its asynchronous output-copy branch is CUDA-only.
+The profile's `async_scheduling` setting does not change that copy behavior.
+
+This profile is experimental. NPU quality/performance qualification is
+pending; enabling it does not establish a speedup or audio parity. To return
+to the NPU V1 DAC, restart with `--deploy-config vllm_omni/deploy/fish_omni.yaml`.
+The CUDA defaults are unchanged by the opt-in profile.
+
+#### Qualification
+
+The hardware test runs both the V1 control and V2 profile using real weights:
+WAV and streaming PCM, a long utterance that crosses the ramp into a steady
+64-frame window, concurrent requests with two cancellations, request-count
+cleanup, and repeated synthesis after cancellation. Missing cleanup metrics
+fail explicitly. The NPU nightly pipeline selects these tests on two A3 cards;
+for a local two-card 910B validation, use the same platform selection below
+and record the actual hardware in the results.
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1 pytest -v \
+    tests/platforms/npu/test_fish_dac_mrv2.py \
+    tests/e2e/online_serving/test_fish_omni_npu_mrv2.py \
+    -m 'advanced_model and npu' --run-level advanced_model
+```
+
+Set `FISH_OMNI_NPU_MODEL` to use an existing local Drama3 checkpoint. The CPU
+handoff regression in `test_fish_omni_async_chunk.py` separately checks the
+complete ramp, request reordering, partial tails and empty terminal windows
+with a deterministic synthetic codec. It is a protocol test, not a neural
+codec quality or hardware parity result.
+
+`test_fish_dac_mrv2.py` loads the real codec on NPU and compares fixed-code
+outputs through the actual V1 and V2 `sample_tokens` methods after another
+decode. It isolates output partitioning and ownership; it supplies synthetic
+runner scheduling state and does not test engine initialization or native
+receive. Those paths are exercised by the online tests.
+
+Before switching defaults, compare V1/V2 on the same hardware, checkpoint,
+Stage 0 settings and workload. Record TTFA, stream gaps, RTF, throughput,
+peak memory, WER and speaker similarity, including warmup, repeated runs,
+version SHAs and reproducible commands. The smoke tests alone do not qualify
+performance or quality. See the [migration plan](../../docs/design/feature/fish_dac_npu_mrv2_plan.md).

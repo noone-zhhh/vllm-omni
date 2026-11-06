@@ -3259,6 +3259,37 @@ class TestPlatformOverrides:
         with pytest.raises(NotImplementedError, match="XPU"):
             _apply_platform_overrides(deploy, platform="xpu")
 
+    @pytest.mark.parametrize("platform", ["npu", "cuda", "rocm", "musa"])
+    def test_fish_omni_npu_mrv2_changes_only_the_npu_dac_runner(self, platform):
+        pipeline = resolve_pipeline_config("fish_omni")
+        baseline = _apply_platform_overrides(
+            load_deploy_config(Path(get_deploy_config_path("fish_omni.yaml"))), platform=platform
+        )
+        candidate = _apply_platform_overrides(
+            load_deploy_config(Path(get_deploy_config_path("fish_omni_npu_mrv2.yaml"))), platform=platform
+        )
+        baseline_stages = merge_pipeline_deploy(pipeline, baseline)
+        candidate_stages = merge_pipeline_deploy(pipeline, candidate)
+
+        # Stage-list inheritance must preserve the AR TP/EP, graphs, devices,
+        # and memory settings, along with the connector's streaming windows.
+        assert candidate.stages[0] == baseline.stages[0]
+        assert candidate.connectors == baseline.connectors
+        assert candidate_stages[0] == baseline_stages[0]
+        if platform != "npu":
+            assert candidate_stages == baseline_stages
+            return
+
+        assert baseline.stages[1].model_runner == "v1"
+        assert candidate.stages[1].model_runner == "v2"
+        assert candidate.stages[1].enforce_eager is True
+        assert candidate.stages[1].compilation_config["cudagraph_mode"] == "NONE"
+        assert candidate.stages[1].devices == baseline.stages[1].devices == "1"
+        assert candidate.stages[1].gpu_memory_utilization == baseline.stages[1].gpu_memory_utilization
+        assert candidate.stages[1].max_num_seqs == baseline.stages[1].max_num_seqs
+        assert candidate_stages[1].yaml_engine_args["use_v2_model_runner"] is True
+        assert candidate_stages[1].yaml_engine_args["supports_native_mrv2_data_plane"] is True
+
     @pytest.mark.parametrize(
         "filename",
         [

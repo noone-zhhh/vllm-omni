@@ -1,6 +1,7 @@
 # Fish DAC 的 NPU MRV2 迁移方案
 
-状态：开发方案；依赖已集成，Fish NPU 配置和功能验证尚未实施。
+状态：依赖已集成；已实现 opt-in 配置、配置回归测试、合成 codec 的完整窗口交接测试、
+NPU V1/V2 在线验收测试及 nightly 入口。NPU 硬件验收和质量/性能比较尚未运行。
 
 ## 目标与发布方式
 
@@ -37,7 +38,7 @@ Drama3 Stage 0 / NPU MRV2 AR
   → NPUGenerationWorker
   → NPUOmniGenerationModelRunner
   → FishSpeechDACDecoder / NPU eager
-  → request 对应的 float32 波形 → CPU / 客户端
+  → request 对应的 float32 波形 → 同步物化到 CPU → 客户端
 ```
 
 `W = C + N`：C 是历史帧数，N 是新增帧数。
@@ -66,14 +67,15 @@ Drama3 Stage 0 / NPU MRV2 AR
 - 验证辅助预加载 hook 在服务 ready 前执行，设备、dtype 正确，
   codec 内存分配被启动内存核算覆盖。
 - NPU 应继续关闭 CUDA 专属 graph/stateful 路径，不触发 CUDA 内核或编译。
-- 检查输出 stream/event、异步 D2H 与张量持有方式；后续 forward、取消和
-  输出丢弃都不能使尚未完成拷贝的内存失效。
+- 当前公共 MRV2 runner 仅对 CUDA 启用异步 D2H，NPU 走同步物化路径；
+  不把 `async_scheduling` 等同于异步输出拷贝。验证后续 forward、取消和
+  输出丢弃不会破坏已有输出，性能比较需包含这一实际路径差异。
 
 只有发现可复现缺口时才修改公共 runner，并补与缺口对应的回归测试。
 
 ## 工作包二：显式 NPU V2 配置
 
-计划新增 `vllm_omni/deploy/fish_omni_npu_mrv2.yaml`：
+已新增 `vllm_omni/deploy/fish_omni_npu_mrv2.yaml`：
 
 ```yaml
 base_config: fish_omni.yaml
@@ -88,7 +90,7 @@ platforms:
           cudagraph_mode: NONE
 ```
 
-此配置是待验证草案。通过实际配置解析测试确认：
+配置解析回归测试覆盖以下要求；需在具备 vLLM 的环境运行：
 
 - 基础 `fish_omni.yaml` 的 NPU stage 1 仍为 V1。
 - 新 profile 的 NPU stage 1 为 V2/eager/NONE。
@@ -118,18 +120,20 @@ platforms:
 先固定同一组 codec codes，通过各自 runner/接收路径解码，隔离 Stage 0 采样差异。
 固定窗口切分、dtype、设备和 codec 权重，核对每个 request 的顺序、样本数、
 最大/平均数值误差和有限值。先测重复运行的确定性，再制定有依据的误差范围。
-测试必须经过 runner；仅直接调用 decoder 无法验证本次迁移。
+已增加 `tests/platforms/npu/test_fish_dac_mrv2.py`：真实 codec 解码固定窗口后，
+分别调用 V1/V2 的 `sample_tokens` 并在下一次 decode 后检查输出一致性。
+它使用合成调度状态，只验证 runner 的输出边界；完整输入与引擎路径由在线测试覆盖。
 
 ### Drama3 端到端
 
-计划新增 `tests/e2e/online_serving/test_fish_omni_npu_mrv2.py`，覆盖：
+已新增 `tests/e2e/online_serving/test_fish_omni_npu_mrv2.py`，针对 V1/V2 profile 覆盖：
 
 - 首请求、重复请求、完整输出和流式输出。
 - 生成足够多帧以覆盖全部 ramp、64 帧稳定窗口和尾包。
 - 多请求混合长度与 batch 重排，无音频串流、重复或遗漏。
 - 首包后取消、处理中取消、并发中部分取消；检查请求指标归零及后续服务可用。
 - 指标缺失须单独报错，不能把缺失误判为清理成功。
-- 多轮运行后无持续内存增长或请求状态残留。
+- 取消后的重复请求与请求指标归零；长期设备内存稳定性仍需硬件测量。
 
 硬件初始目标为用户计划使用的 Ascend 910B；记录实际卡型、卡数和显存。
 基线与候选使用同一集成代码，唯一主要变量为 Stage 1 的 V1/V2 选择。
@@ -141,7 +145,9 @@ platforms:
 
 每份结果记录 Omni、vLLM、vLLM-Ascend、PyTorch、torch-npu、CANN、模型 SHA、
 硬件、完整配置、执行模式、数据集、命令和重复次数；未测项显式标注。
-NPU CI 用例选择和 agent 标记需与平台负责人约定；不以本机语法检查代替硬件资格。
+新增 NPU nightly A3 双卡任务，尚未触发或取得 CI 结果；合入时由平台负责人确认资源安排。
+不以本机语法检查或合成 codec 测试代替硬件资格。固定 codes 的硬件测试已编写但未运行；
+完整引擎路径验收、长期内存测量和质量/性能实验仍是默认切换前的待办。
 
 ## 执行顺序与退出条件
 
@@ -156,3 +162,26 @@ NPU CI 用例选择和 agent 标记需与平台负责人约定；不以本机语
 验收底线：无崩溃/挂起、无请求串流和重复窗口、样本数正确、取消后资源可回收。
 默认切换还要求质量处于 V1 重复波动范围，RTF/TTFA/吞吐无回退。
 依赖通过 Qwen3-TTS 验证不能代替 Fish DAC 的这些证据。
+
+## 本次本地检查
+
+实现基于 `ec9ac458f`，在 macOS 上检查，未使用 NPU 或模型权重：
+
+- 变更文件的完整 pre-commit 通过，包括 Ruff、mypy 3.10、Markdown、
+  SPDX、测试标记、禁止导入、CUDA 调用检查及 Buildkite schema。
+- Python 语法、YAML 解析、`git diff --check` 通过。
+- 隔离运行生产代码的 YAML 继承函数通过：Stage 0、connector、其他平台配置保持一致，
+  NPU Stage 1 为 V2/eager/NONE。此检查不代替完整 StageConfigFactory 测试。
+- 完整 pytest 在 fixture 加载阶段被临时环境缺少 `torch` 阻断；本机也没有
+  `vllm` / `vllm-ascend` 运行环境，因此不报告 pytest 或硬件通过结果。
+
+具备项目运行依赖后，先执行 CPU 回归：
+
+```bash
+pytest -q tests/config/test_config_factory.py \
+    tests/model_executor/stage_input_processors/test_fish_omni_async_chunk.py \
+    -k fish_omni --run-level core_model
+```
+
+硬件测试命令与 V1 回退方法见 Drama3 recipe。当前实现只作为显式 opt-in，
+没有提交质量、性能或稳定性达标的声明。

@@ -571,6 +571,18 @@ vllm serve Qwen/Qwen2.5-Omni-7B --omni --port 8091 --deploy-config /path/to/depl
 !!! important
     We are actively iterating on the definition of deployment configurations, and we welcome feedback from users and developers.
 
+## Drama3 DAC with Model Runner V2 on NPU
+
+`fish_omni.yaml` keeps the NPU DAC stage on Model Runner V1. The experimental
+`fish_omni_npu_mrv2.yaml` profile opts stage 1 into the NPU MRV2 generation
+runner with eager execution and outer graph mode `NONE`. It inherits the
+existing Stage 0 runner, TP/EP settings, devices and connector windows.
+CUDA and other platform defaults are unchanged. Restart with the base
+profile to return the NPU DAC to V1.
+
+Hardware quality and performance qualification is pending. For launch and
+validation commands, see the [Drama3 recipe](../../recipes/fishaudio/Drama-3.md#opt-in-npu-dac-on-model-runner-v2).
+
 ## Qwen3-TTS with Model Runner V2
 
 Qwen3-TTS runs the native Model Runner V2 pipeline by default on CUDA on

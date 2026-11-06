@@ -1,0 +1,12 @@
+# Opt-in Drama 3 DAC migration on Ascend. The base profile keeps NPU DAC on V1
+# until hardware quality, streaming correctness, and performance are qualified.
+base_config: fish_omni.yaml
+
+platforms:
+  npu:
+    stages:
+      - stage_id: 1
+        model_runner: v2
+        enforce_eager: true
+        compilation_config:
+          cudagraph_mode: NONE
