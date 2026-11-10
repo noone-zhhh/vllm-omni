@@ -1061,7 +1061,7 @@ def test_fish_omni_npu_profile_is_mrv2_tp_ep():
     assert stage0.enforce_eager is False
     assert stage0.gpu_memory_utilization == 0.72
     assert stage0.devices == "0,1"
-    assert stage1.model_runner == "v1"
+    assert stage1.model_runner == "v2"
     assert stage1.gpu_memory_utilization == 0.1
     assert stage1.devices == "1"
 

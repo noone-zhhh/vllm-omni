@@ -74,9 +74,7 @@ stages:
       repetition_penalty: 1.0
 
   - stage_id: 1
-    # V1 unless a platform entry below sets model_runner for stage 1. On CUDA,
-    # platforms.cuda sets v2, and a top-level or stages: model_runner does not
-    # override it.
+    # CUDA and NPU select V2 in their platform entries below.
     model_runner: v1
     max_num_seqs: 128
     gpu_memory_utilization: 0.1
@@ -108,7 +106,7 @@ platforms:
       # Set model_runner: v1 here to opt out.
       - stage_id: 1
         model_runner: v2
-  # Stage 0 stays on Model Runner V2. The NPU AR worker builds Ascend input
+  # Both stages use Model Runner V2. The NPU AR worker builds Ascend input
   # state and attention metadata. Tensor parallel shards the backbone; expert
   # parallel puts 128 of the 256 routed experts on each card. vLLM-Ascend
   # expands those block-FP8 experts to bf16: 256 x 40 x (2 x 512 x 2048 +
@@ -147,6 +145,7 @@ platforms:
           cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]
         devices: "0,1"
       - stage_id: 1
+        model_runner: v2
         gpu_memory_utilization: 0.10
         enforce_eager: true
         max_num_seqs: 64

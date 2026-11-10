@@ -573,6 +573,24 @@ vllm serve Qwen/Qwen2.5-Omni-7B --omni --port 8091 --deploy-config /path/to/depl
 !!! important
     We are actively iterating on the definition of deployment configurations, and we welcome feedback from users and developers.
 
+## Drama-3 with Model Runner V2
+
+Drama-3 uses `fish_omni.yaml` as its default deploy configuration. The
+autoregressive stage uses Model Runner V2; the DAC decoder selects V2 under
+`platforms.cuda` and `platforms.npu`. Omitting `--deploy-config` selects the
+same file:
+
+```bash
+vllm serve fishaudio/drama-3 --omni \
+  --deploy-config vllm_omni/deploy/fish_omni.yaml
+```
+
+On NPU, stage 0 uses tensor parallelism across devices `0,1` with expert
+parallelism enabled. The DAC decoder runs on device `1` with
+`enforce_eager: true`.
+See the [Drama-3 recipe](gh-file:recipes/fishaudio/Drama-3.md) for model usage
+and deployment details.
+
 ## Qwen3-TTS with Model Runner V2
 
 Qwen3-TTS runs the native CUDA Model Runner V2 pipeline by default on vLLM

@@ -3283,14 +3283,15 @@ class TestPlatformOverrides:
     @pytest.mark.parametrize(
         "platform,runs_v2",
         [
+            ("cpu", [True, False]),
             ("cuda", [True, True]),
-            ("npu", [True, False]),
+            ("npu", [True, True]),
             ("rocm", [True, False]),
             ("musa", [True, False]),
             ("xpu", [True, False]),
         ],
     )
-    def test_fish_omni_dac_stage_runs_v2_on_cuda_only(self, platform, runs_v2):
+    def test_fish_omni_dac_stage_runs_v2_on_cuda_and_npu(self, platform, runs_v2):
         deploy = load_deploy_config(Path(get_deploy_config_path("fish_omni.yaml")))
         deploy = _apply_platform_overrides(deploy, platform=platform)
 
