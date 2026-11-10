@@ -233,8 +233,8 @@ tensor parallel 2 and expert parallel, replaying piecewise ACL graphs
 Ascend input state (`AscendInputBatch` with `attn_state` and `seq_lens_np`)
 and the model state builds Ascend attention metadata. Gated-delta-net stays on
 the Ascend implementation. The codebook tower uses the eager norm and sampling
-path. Stage 1 (DAC) shares the second card and stays eager, without ACL graphs
-or MPS.
+path. Stage 1 (DAC) uses Model Runner V2, shares the second card and stays
+eager, without ACL graphs or MPS.
 Sampling noise is broadcast from tensor-parallel rank 0 so both ranks draw
 the same frame.
 
@@ -245,6 +245,9 @@ ASCEND_RT_VISIBLE_DEVICES=0,1 vllm serve fishaudio/drama-3 --omni --port 8091
 `vllm_omni/deploy/fish_omni.yaml` applies this `npu` profile automatically
 (`tensor_parallel_size: 2`, `enable_expert_parallel: true`, `max_num_seqs: 64`,
 stage 0 `enforce_eager: false`).
+Stage 1 selects `model_runner: v2` under `platforms.npu`. To select a different
+DAC runner, set `model_runner` for stage 1 in that platform entry in a copy
+of the file.
 Stage 0 reserves 0.72 of each card and stage 1 reserves 0.10 of the second
 card. The speech request is the same as the GPU section.
 
