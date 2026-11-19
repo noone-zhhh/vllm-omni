@@ -385,3 +385,43 @@ def test_dac_stream_history_follows_the_drama3_chunker(left_context):
     manager.request_payload.clear()
     restarted = run_stream("r", 20)
     assert restarted[0][1] is True and restarted[0][2] == 0
+
+
+@pytest.mark.parametrize("stateful", [True, False])
+def test_dac_forward_dispatches_graph_windows(monkeypatch, stateful):
+    """Exercise the model's graph planner and dispatch without capturing a device graph."""
+    from vllm_omni.model_executor.models.fish_speech.dac_channels_last import DACDecodeGraphs
+
+    decoder = _stream_decoder(1)
+    decoder._stateful = stateful
+    decoder._codec = _RecordingCodec()
+    decoder._num_codebooks = decoder._hop_length = 1
+    decoder._output_sample_rate = 44100
+    decoder._logged_codec_stats = True
+    decoder._extra_cfg = {}
+    decoder._decode_batch_max_batch = 1
+    decoder._decode_batch_max_padded_frames = 32
+    decoder._channels_last = SimpleNamespace(receptive_frames=2, transformer=SimpleNamespace(freqs_cis=torch.empty(32)))
+    monkeypatch.setattr(DACDecodeGraphs, "capture", lambda self, device: None)
+    calls = []
+
+    def replay(self, codes, trim=0, rows=None):
+        calls.append((codes.flatten().tolist(), None if rows is None else rows.flatten().tolist()))
+        return codes[:, :1, trim:].float()
+
+    monkeypatch.setattr(DACDecodeGraphs, "__call__", replay)
+    decoder._capture_graphs(torch.device("cpu"))
+    # One unit of replay cost per single-row bucket substitutes for device timing.
+    graphs = decoder._graphs
+    graphs.cost_ms = {(1, frames, trim): 1.0 for frames in graphs.frame_buckets for trim in graphs.trims[frames]}
+    for seq, context, codes in [(0, 0, [1, 2]), (1, 1, [2, 3, 4])]:
+        out = decoder(
+            torch.tensor(codes),
+            request_ids=["r"],
+            runtime_additional_information=[{"meta": {"chunk_seq": seq, "left_context_size": context}}],
+        )
+        assert out.multimodal_outputs["model_outputs"][0].tolist() == codes[context:]
+    if stateful:
+        assert calls == [([1, 2], [0, 1, 2, 0]), ([3, 4], [0, 0, 2, 2])]
+    else:
+        assert calls == [([1, 2], None), ([2, 3, 4], None)]

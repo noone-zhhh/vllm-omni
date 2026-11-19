@@ -82,6 +82,7 @@ class FishSpeechDACDecoder(nn.Module):
 
     # Set in __init__ / at codec load; defaults keep partially built decoders usable.
     _channels_last = None
+    _eager_stream = None
     _graphs = None
     _cuda_graphs = False
     _stateful = False
@@ -137,7 +138,7 @@ class FishSpeechDACDecoder(nn.Module):
         # keys / values between windows: a window then decodes only its new
         # frames, as decoding the whole utterance would.
         self._stateful = bool(extra_cfg.get("fish_speech_dac_stateful", False))
-        if self._stateful and not self._cuda_graphs:
+        if self._stateful and not self._cuda_graphs and not current_omni_platform.is_npu():
             raise ValueError("fish_speech_dac_stateful needs fish_speech_dac_cuda_graphs (the channels-last decoder)")
         self._stream_slots = {}
         self._free_stream_slots = []
@@ -255,6 +256,16 @@ class FishSpeechDACDecoder(nn.Module):
         device = self.vllm_config.device_config.device
         codec = codec.to(device=device, dtype=self._dac_dtype)
         codec.eval()
+        if self._stateful and current_omni_platform.is_npu():
+            from vllm_omni.platforms.npu.models.fish_dac import NPUStatefulDACDecoder, supports_stateful_dac
+
+            self._stateful = codec.decoder is not None and supports_stateful_dac()
+            self._cuda_graphs = False
+            if self._stateful:
+                slots = self.vllm_config.scheduler_config.max_num_seqs
+                self._eager_stream = NPUStatefulDACDecoder(codec, slots)
+                self._free_stream_slots = list(reversed(range(slots)))
+                logger.info("Enabled eager Fish DAC streaming history on NPU (%d slots)", slots)
         self._codec = codec
         self._codec_decode_takes_lengths = len(inspect.signature(codec.decode).parameters) >= 2
         if self._cuda_graphs and not current_omni_platform.is_cuda():
@@ -507,6 +518,23 @@ class FishSpeechDACDecoder(nn.Module):
                     current_max_frames = next_max_frames
             if current:
                 yield current
+
+        if self._eager_stream is not None:
+            audios = [empty] * num_req
+            windows = self._eager_stream.decode_batch(
+                self,
+                valid_codes_qf,
+                valid_indices,
+                parsed_ctx_frames,
+                runtime_additional_information,
+                kwargs.get("request_ids") or [],
+                _iter_bounded_groups,
+            )
+            for idx, wav in zip(valid_indices, windows, strict=True):
+                audios[idx] = wav
+            return OmniOutput(
+                text_hidden_states=None, multimodal_outputs={"model_outputs": audios, "sr": [sr_tensor] * num_req}
+            )
 
         def _decode_group(
             group: list[tuple[int, torch.Tensor]],
